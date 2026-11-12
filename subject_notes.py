@@ -23,10 +23,11 @@ class NotesApp(tk.Tk):
 
         self._saving_disabled = False
         self._save_job = None
+        self._write_error_shown = False
         self._refreshing = False
         self.current = None
         self.current_task = None
-        self.row_widgets = {}          # subject name -> dict of widgets in the sidebar
+        self.row_widgets = {}
         self.status_buttons = []
         self.task_action_buttons = []
 
@@ -36,59 +37,64 @@ class NotesApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------------------------------------------------------------- storage
+    def _handle_corrupt(self, error):
+        backup = DATA_FILE.with_name(
+            f"{DATA_FILE.name}.corrupt-{int(time.time())}"
+        )
+        try:
+            DATA_FILE.replace(backup)
+            moved = backup
+        except OSError:
+            moved = None
+            self._saving_disabled = True
+        messagebox.showwarning(
+            "Could not read subjects.json",
+            f"{error}\n\n"
+            + (
+                f"The old file was renamed to:\n{moved}"
+                if moved is not None
+                else "The old file could not be moved; saving is disabled "
+                     "for this session so it is not overwritten."
+            ),
+            parent=self,
+        )
+        return {}
+
     def load(self):
         try:
             text = DATA_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
             return {}
-        except OSError:
-            return {}
+        except (OSError, UnicodeDecodeError) as e:
+            return self._handle_corrupt(e)
         try:
             raw = json.loads(text)
         except json.JSONDecodeError as e:
-            backup = DATA_FILE.with_name(
-                f"{DATA_FILE.name}.corrupt-{int(time.time())}"
-            )
-            moved = None
-            try:
-                DATA_FILE.replace(backup)
-                moved = backup
-            except OSError:
-                moved = None
-            if moved is None:
-                # We could not move the bad file out of the way; refuse to
-                # overwrite it on the next save so nothing is destroyed.
-                self._saving_disabled = True
-            messagebox.showwarning(
-                "Could not read subjects.json",
-                f"{e}\n\n"
-                + (
-                    f"The old file was renamed to:\n{moved}"
-                    if moved is not None
-                    else "The old file could not be moved; saving is disabled "
-                         "for this session so it is not overwritten."
-                ),
-                parent=self,
-            )
-            return {}
+            return self._handle_corrupt(e)
         if not isinstance(raw, dict):
-            return {}
+            return self._handle_corrupt(
+                ValueError("Root JSON value is not an object.")
+            )
+
         data = {}
         for name, value in raw.items():
             if isinstance(value, str):
                 value = {"notes": value, "tasks": []}
             if not isinstance(value, dict):
                 continue
-            value.setdefault("notes", "")
-            value.setdefault("tasks", [])
-            if not isinstance(value["tasks"], list):
-                value["tasks"] = []
+            if not isinstance(value.get("notes"), str):
+                value["notes"] = ""
+            raw_tasks = value.get("tasks")
+            if not isinstance(raw_tasks, list):
+                raw_tasks = []
+            value["tasks"] = [t for t in raw_tasks if isinstance(t, dict)]
             for t in value["tasks"]:
-                if not isinstance(t, dict):
-                    continue
-                t.setdefault("status", NOT_DONE)
-                t.setdefault("description", "")
-                t.setdefault("title", "")
+                if not isinstance(t.get("title"), str):
+                    t["title"] = ""
+                if not isinstance(t.get("description"), str):
+                    t["description"] = ""
+                if t.get("status") not in STATUSES:
+                    t["status"] = NOT_DONE
             data[name] = value
         return data
 
@@ -96,22 +102,33 @@ class NotesApp(tk.Tk):
         if self._saving_disabled:
             return
         tmp = DATA_FILE.with_name(DATA_FILE.name + ".tmp")
-        tmp.write_text(
-            json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        # Atomic rename: subjects.json is either the old version or the new
-        # one, never a half-written file.
-        tmp.replace(DATA_FILE)
+        try:
+            tmp.write_text(
+                json.dumps(self.data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(DATA_FILE)
+            self._write_error_shown = False
+        except OSError as e:
+            if not self._write_error_shown:
+                self._write_error_shown = True
+                messagebox.showerror(
+                    "Could not save",
+                    f"Could not write subjects.json:\n{e}\n\n"
+                    "Further errors will not be shown this session. "
+                    "Check disk space and file permissions.",
+                    parent=self,
+                )
 
     def save_task_desc(self):
-        if self.current and self.current_task is not None:
+        if self.current in self.data and self.current_task is not None:
             tasks = self.data[self.current]["tasks"]
-            if self.current_task < len(tasks):
-                tasks[self.current_task]["description"] = self.desc.get("1.0", "end-1c")
+            if 0 <= self.current_task < len(tasks):
+                tasks[self.current_task]["description"] = (
+                    self.desc.get("1.0", "end-1c")
+                )
 
     def save_current(self):
-        # Flush any pending debounced save so it does not fire later against
-        # the wrong subject.
         if self._save_job:
             self.after_cancel(self._save_job)
             self._save_job = None
@@ -137,7 +154,6 @@ class NotesApp(tk.Tk):
         left.pack(side="left", fill="y")
         tk.Label(left, text="Subjects", font=("Segoe UI", 11, "bold")).pack(anchor="w")
 
-        # ---- scrollable sidebar where every subject gets its own progress bar
         lf = tk.Frame(left)
         lf.pack(fill="both", expand=True, pady=4)
 
@@ -165,15 +181,29 @@ class NotesApp(tk.Tk):
 
         b = tk.Frame(left)
         b.pack(fill="x")
-        tk.Button(b, text="Add", command=self.add_subject).pack(side="left", expand=True, fill="x")
-        tk.Button(b, text="Rename", command=self.rename_subject).pack(side="left", expand=True, fill="x")
-        tk.Button(b, text="Delete", command=self.delete_subject).pack(side="left", expand=True, fill="x")
+        tk.Button(b, text="Add", command=self.add_subject).pack(
+            side="left", expand=True, fill="x")
+        tk.Button(b, text="Rename", command=self.rename_subject).pack(
+            side="left", expand=True, fill="x")
+        tk.Button(b, text="Delete", command=self.delete_subject).pack(
+            side="left", expand=True, fill="x")
 
         right = tk.Frame(self, padx=8, pady=8)
         right.pack(side="right", fill="both", expand=True)
 
+        if self._saving_disabled:
+            tk.Label(
+                right,
+                text="\u26a0  Saving is disabled \u2014 subjects.json could "
+                     "not be read or moved aside. Fix or remove the file, "
+                     "then restart the app.",
+                bg="#fde2e1", fg="#8a1c1c", pady=6,
+                font=("Segoe UI", 10, "bold"),
+            ).pack(fill="x", pady=(0, 4))
+
         self.title_label = tk.Label(
-            right, text="Select or add a subject", font=("Segoe UI", 13, "bold"), anchor="w"
+            right, text="Select or add a subject",
+            font=("Segoe UI", 13, "bold"), anchor="w",
         )
         self.title_label.pack(fill="x")
 
@@ -194,7 +224,8 @@ class NotesApp(tk.Tk):
         self.task_action_buttons.append(b)
         tk.Label(top, text="Mark as:").pack(side="left", padx=(16, 4))
         for status in STATUSES:
-            b = tk.Button(top, text=ICONS[status], command=lambda s=status: self.set_status(s))
+            b = tk.Button(top, text=ICONS[status],
+                          command=lambda s=status: self.set_status(s))
             b.pack(side="left", padx=2)
             self.status_buttons.append(b)
         self.progress = tk.Label(top, text="", fg="gray40")
@@ -202,8 +233,10 @@ class NotesApp(tk.Tk):
 
         tf = tk.Frame(tasks_tab)
         tf.pack(fill="both", expand=True, pady=6)
-        self.tree = ttk.Treeview(tf, columns=("status", "title"), show="headings", height=8,
-                                 selectmode="browse")
+        self.tree = ttk.Treeview(
+            tf, columns=("status", "title"), show="headings",
+            height=8, selectmode="browse",
+        )
         self.tree.heading("status", text="Status")
         self.tree.heading("title", text="Task")
         self.tree.column("status", width=130, stretch=False)
@@ -215,17 +248,17 @@ class NotesApp(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         tsb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.on_task_select)
-        self.tree.bind("<Double-1>", self.cycle_status)
-        self.tree.bind("<Delete>", lambda e: self.delete_task())
+        self.tree.bind("<Double-1>", self._on_task_double_click)
         self.tree.bind("<Return>", lambda e: self.cycle_status())
+        self.tree.bind("<Delete>", lambda e: self.delete_task())
 
         self.desc_label = tk.Label(tasks_tab, text="Description", anchor="w",
                                    font=("Segoe UI", 10, "bold"))
         self.desc_label.pack(fill="x")
         df = tk.Frame(tasks_tab)
         df.pack(fill="both", expand=True)
-        self.desc = tk.Text(df, wrap="word", undo=True, height=8, font=("Segoe UI", 11),
-                            state="disabled")
+        self.desc = tk.Text(df, wrap="word", undo=True, height=8,
+                            font=("Segoe UI", 11), state="disabled")
         dsb = tk.Scrollbar(df, command=self.desc.yview)
         self.desc.config(yscrollcommand=dsb.set)
         self.desc.pack(side="left", fill="both", expand=True)
@@ -236,7 +269,8 @@ class NotesApp(tk.Tk):
         tabs.add(notes_tab, text="Notes")
         nf = tk.Frame(notes_tab)
         nf.pack(fill="both", expand=True)
-        self.notes = tk.Text(nf, wrap="word", undo=True, font=("Segoe UI", 11), state="disabled")
+        self.notes = tk.Text(nf, wrap="word", undo=True,
+                             font=("Segoe UI", 11), state="disabled")
         nsb = tk.Scrollbar(nf, command=self.notes.yview)
         self.notes.config(yscrollcommand=nsb.set)
         self.notes.pack(side="left", fill="both", expand=True)
@@ -246,6 +280,8 @@ class NotesApp(tk.Tk):
         self.bind("<Control-n>", lambda e: self.add_subject())
         self.bind("<Control-t>", lambda e: self.add_task())
 
+        self._sync_task_buttons()
+
     # -------------------------------------------------- subject sidebar rows
     def _on_rows_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -254,8 +290,9 @@ class NotesApp(tk.Tk):
         self.canvas.itemconfigure(self._rows_id, width=event.width)
 
     def _on_mousewheel(self, event):
-        step = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(step, "units")
+        if event.delta == 0:
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     def _bar_style(self, frac):
         if frac >= 1.0:
@@ -277,7 +314,8 @@ class NotesApp(tk.Tk):
 
         top = tk.Frame(row)
         top.pack(fill="x")
-        label = tk.Label(top, text=name, anchor="w", font=("Segoe UI", 10, "bold"))
+        label = tk.Label(top, text=name, anchor="w",
+                         font=("Segoe UI", 10, "bold"))
         label.pack(side="left", fill="x", expand=True)
         count = tk.Label(top, text=(f"{done}/{total}" if total else "\u2013"),
                          anchor="e", fg="gray35", font=("Segoe UI", 9))
@@ -302,14 +340,15 @@ class NotesApp(tk.Tk):
         for name, w in self.row_widgets.items():
             selected = (name == self.current)
             bg = SELECTED_BG if selected else base
-            w["row"].configure(bg=bg,
-                               highlightbackground=SELECTED_BORDER if selected else base)
+            w["row"].configure(
+                bg=bg,
+                highlightbackground=SELECTED_BORDER if selected else base,
+            )
             w["top"].configure(bg=bg)
             w["label"].configure(bg=bg)
             w["count"].configure(bg=bg)
 
     def update_progress_bars(self, name=None):
-        """Refresh one subject's progress bar (or all of them when name is None)."""
         names = [name] if name is not None else list(self.row_widgets)
         for n in names:
             if n not in self.row_widgets:
@@ -334,9 +373,11 @@ class NotesApp(tk.Tk):
             child.destroy()
         self.row_widgets = {}
         if not self.data:
-            tk.Label(self.rows,
-                     text="No subjects yet.\nClick Add to get started.",
-                     fg="gray45", justify="center", pady=20).pack(fill="x")
+            tk.Label(
+                self.rows,
+                text="No subjects yet.\nClick Add to get started.",
+                fg="gray45", justify="center", pady=20,
+            ).pack(fill="x")
         for name in self.data:
             self._make_subject_row(name)
         self.rows.update_idletasks()
@@ -372,7 +413,7 @@ class NotesApp(tk.Tk):
             return
         name = name.strip()
         if name in self.data:
-            messagebox.showwarning("Exists", f'"{name}" already exists.')
+            messagebox.showwarning("Exists", f'"{name}" already exists.', parent=self)
             return
         self.save_current()
         self.data[name] = {"notes": "", "tasks": []}
@@ -390,10 +431,11 @@ class NotesApp(tk.Tk):
             return
         new = new.strip()
         if new in self.data:
-            messagebox.showwarning("Exists", f'"{new}" already exists.')
+            messagebox.showwarning("Exists", f'"{new}" already exists.', parent=self)
             return
         self.save_current()
-        self.data = {(new if k == self.current else k): v for k, v in self.data.items()}
+        self.data = {(new if k == self.current else k): v
+                     for k, v in self.data.items()}
         self.write_file()
         self.current = new
         self.title_label.config(text=new)
@@ -403,7 +445,9 @@ class NotesApp(tk.Tk):
         if not self.current:
             return
         if not messagebox.askyesno(
-            "Delete subject", f'Delete "{self.current}" and all its tasks and notes?'
+            "Delete subject",
+            f'Delete "{self.current}" and all its tasks and notes?',
+            parent=self,
         ):
             return
         del self.data[self.current]
@@ -422,30 +466,36 @@ class NotesApp(tk.Tk):
 
     def refresh_tasks(self, select=None):
         self._refreshing = True
-        self.tree.delete(*self.tree.get_children())
-        tasks = self.tasks()
-        for i, t in enumerate(tasks):
-            self.tree.insert("", "end", iid=str(i), values=(ICONS[t["status"]], t["title"]),
-                             tags=(t["status"],))
-        if select is not None and select < len(tasks):
-            self.tree.selection_set(str(select))
-            self.tree.see(str(select))
+        try:
+            self.tree.delete(*self.tree.get_children())
+            tasks = self.tasks()
+            for i, t in enumerate(tasks):
+                self.tree.insert(
+                    "", "end", iid=str(i),
+                    values=(ICONS[t["status"]], t["title"]),
+                    tags=(t["status"],),
+                )
+            if select is not None and 0 <= select < len(tasks):
+                self.tree.selection_set(str(select))
+                self.tree.see(str(select))
 
-        done = sum(t["status"] == DONE for t in tasks)
-        self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
-        if select is not None and select < len(tasks):
-            self.show_task(select)
-        else:
-            self.clear_task_editor()
-        self._refreshing = False
+            done = sum(t["status"] == DONE for t in tasks)
+            self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
+            if select is not None and 0 <= select < len(tasks):
+                self.show_task(select)
+            else:
+                self.clear_task_editor()
+        finally:
+            self._refreshing = False
 
-        # Only the current subject's bar can have changed.
         self.update_progress_bars(self.current)
 
     def show_task(self, idx):
         self.current_task = idx
         t = self.tasks()[idx]
-        title = t["title"] if len(t["title"]) <= 50 else t["title"][:47] + "\u2026"
+        title = t["title"].replace("\n", " ").replace("\r", " ")
+        if len(title) > 50:
+            title = title[:47] + "\u2026"
         self.desc_label.config(text=f"Description \u2014 {title}")
         self.desc.config(state="normal")
         self.desc.delete("1.0", "end")
@@ -475,13 +525,15 @@ class NotesApp(tk.Tk):
 
     def add_task(self):
         if not self.current:
-            messagebox.showinfo("No subject", "Add or select a subject first.")
+            messagebox.showinfo("No subject", "Add or select a subject first.",
+                                parent=self)
             return
         title = simpledialog.askstring("Add task", "Task title:", parent=self)
         if not title or not title.strip():
             return
         self.save_task_desc()
-        self.tasks().append({"title": title.strip(), "status": NOT_DONE, "description": ""})
+        self.tasks().append({"title": title.strip(), "status": NOT_DONE,
+                             "description": ""})
         self.write_file()
         self.refresh_tasks(select=len(self.tasks()) - 1)
         self.desc.focus_set()
@@ -490,7 +542,8 @@ class NotesApp(tk.Tk):
         if self.current_task is None:
             return
         t = self.tasks()[self.current_task]
-        new = simpledialog.askstring("Rename task", "New title:", initialvalue=t["title"], parent=self)
+        new = simpledialog.askstring("Rename task", "New title:",
+                                     initialvalue=t["title"], parent=self)
         if not new or not new.strip():
             return
         self.save_task_desc()
@@ -503,7 +556,8 @@ class NotesApp(tk.Tk):
             return
         idx = self.current_task
         t = self.tasks()[idx]
-        if not messagebox.askyesno("Delete task", f'Delete task "{t["title"]}"?'):
+        if not messagebox.askyesno("Delete task", f'Delete task "{t["title"]}"?',
+                                   parent=self):
             return
         del self.tasks()[idx]
         self.current_task = None
@@ -525,6 +579,11 @@ class NotesApp(tk.Tk):
             return
         cur = self.tasks()[self.current_task]["status"]
         self.set_status(STATUSES[(STATUSES.index(cur) + 1) % len(STATUSES)])
+
+    def _on_task_double_click(self, event):
+        if not self.tree.identify_row(event.y):
+            return
+        self.cycle_status()
 
     def on_close(self):
         self.save_current()
