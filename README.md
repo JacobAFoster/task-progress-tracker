@@ -82,3 +82,7 @@ Valid task statuses are `Not done`, `In progress` and `Done`.
 
 - `subject_notes.py`: the application
 - `subjects.json`: your data (created on first use)
+
+add progress meter to program
+bug fix 
+optimization fixes
