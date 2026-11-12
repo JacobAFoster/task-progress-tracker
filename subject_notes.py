@@ -1,4 +1,5 @@
 import json
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
@@ -9,6 +10,9 @@ NOT_DONE, IN_PROGRESS, DONE = "Not done", "In progress", "Done"
 STATUSES = [NOT_DONE, IN_PROGRESS, DONE]
 ICONS = {NOT_DONE: "\u2610  Not done", IN_PROGRESS: "\u25d0  In progress", DONE: "\u2714  Done"}
 
+SELECTED_BG = "#cfe3ff"
+SELECTED_BORDER = "#7aa7e0"
+
 
 class NotesApp(tk.Tk):
     def __init__(self):
@@ -17,37 +21,87 @@ class NotesApp(tk.Tk):
         self.geometry("1000x620")
         self.minsize(700, 420)
 
-        self.data = self.load()
-        self.current = None
-        self.current_task = None
+        self._saving_disabled = False
         self._save_job = None
         self._refreshing = False
+        self.current = None
+        self.current_task = None
+        self.row_widgets = {}          # subject name -> dict of widgets in the sidebar
+        self.status_buttons = []
+        self.task_action_buttons = []
 
+        self.data = self.load()
         self.build_ui()
         self.refresh_list()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # ---------------------------------------------------------------- storage
     def load(self):
         try:
-            raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
+            text = DATA_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            return {}
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as e:
+            backup = DATA_FILE.with_name(
+                f"{DATA_FILE.name}.corrupt-{int(time.time())}"
+            )
+            moved = None
+            try:
+                DATA_FILE.replace(backup)
+                moved = backup
+            except OSError:
+                moved = None
+            if moved is None:
+                # We could not move the bad file out of the way; refuse to
+                # overwrite it on the next save so nothing is destroyed.
+                self._saving_disabled = True
+            messagebox.showwarning(
+                "Could not read subjects.json",
+                f"{e}\n\n"
+                + (
+                    f"The old file was renamed to:\n{moved}"
+                    if moved is not None
+                    else "The old file could not be moved; saving is disabled "
+                         "for this session so it is not overwritten."
+                ),
+                parent=self,
+            )
+            return {}
+        if not isinstance(raw, dict):
             return {}
         data = {}
         for name, value in raw.items():
             if isinstance(value, str):
                 value = {"notes": value, "tasks": []}
+            if not isinstance(value, dict):
+                continue
             value.setdefault("notes", "")
             value.setdefault("tasks", [])
+            if not isinstance(value["tasks"], list):
+                value["tasks"] = []
             for t in value["tasks"]:
+                if not isinstance(t, dict):
+                    continue
                 t.setdefault("status", NOT_DONE)
                 t.setdefault("description", "")
+                t.setdefault("title", "")
             data[name] = value
         return data
 
     def write_file(self):
-        DATA_FILE.write_text(
+        if self._saving_disabled:
+            return
+        tmp = DATA_FILE.with_name(DATA_FILE.name + ".tmp")
+        tmp.write_text(
             json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        # Atomic rename: subjects.json is either the old version or the new
+        # one, never a half-written file.
+        tmp.replace(DATA_FILE)
 
     def save_task_desc(self):
         if self.current and self.current_task is not None:
@@ -56,29 +110,58 @@ class NotesApp(tk.Tk):
                 tasks[self.current_task]["description"] = self.desc.get("1.0", "end-1c")
 
     def save_current(self):
+        # Flush any pending debounced save so it does not fire later against
+        # the wrong subject.
+        if self._save_job:
+            self.after_cancel(self._save_job)
+            self._save_job = None
         if self.current in self.data:
             self.data[self.current]["notes"] = self.notes.get("1.0", "end-1c")
             self.save_task_desc()
             self.write_file()
 
     def schedule_save(self, _event=None):
+        if self.current is None:
+            return
         if self._save_job:
             self.after_cancel(self._save_job)
-        self._save_job = self.after(1000, self.save_current)
+        self._save_job = self.after(1000, self._do_save)
 
+    def _do_save(self):
+        self._save_job = None
+        self.save_current()
+
+    # ------------------------------------------------------------------- UI
     def build_ui(self):
         left = tk.Frame(self, padx=8, pady=8)
         left.pack(side="left", fill="y")
         tk.Label(left, text="Subjects", font=("Segoe UI", 11, "bold")).pack(anchor="w")
 
+        # ---- scrollable sidebar where every subject gets its own progress bar
         lf = tk.Frame(left)
         lf.pack(fill="both", expand=True, pady=4)
-        self.listbox = tk.Listbox(lf, width=24, exportselection=False, activestyle="none")
-        sb = tk.Scrollbar(lf, command=self.listbox.yview)
-        self.listbox.config(yscrollcommand=sb.set)
-        self.listbox.pack(side="left", fill="both", expand=True)
+
+        self.canvas = tk.Canvas(lf, width=280, highlightthickness=0)
+        sb = tk.Scrollbar(lf, orient="vertical", command=self.canvas.yview)
+        self.canvas.config(yscrollcommand=sb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.listbox.bind("<<ListboxSelect>>", self.on_subject_select)
+
+        self.rows = tk.Frame(self.canvas)
+        self._rows_id = self.canvas.create_window((0, 0), window=self.rows, anchor="nw")
+        self.rows.bind("<Configure>", self._on_rows_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
+        self.canvas.bind("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
+
+        style = ttk.Style(self)
+        style.configure("Subject.Horizontal.TProgressbar",
+                        thickness=9, troughcolor="#e8e8e8")
+        style.configure("Done.Horizontal.TProgressbar",
+                        thickness=9, troughcolor="#e8e8e8", background="#2e7d32")
+        style.configure("Empty.Horizontal.TProgressbar",
+                        thickness=9, troughcolor="#e8e8e8", background="#a0a0a0")
 
         b = tk.Frame(left)
         b.pack(fill="x")
@@ -103,13 +186,17 @@ class NotesApp(tk.Tk):
         top = tk.Frame(tasks_tab)
         top.pack(fill="x")
         tk.Button(top, text="Add task", command=self.add_task).pack(side="left")
-        tk.Button(top, text="Rename", command=self.rename_task).pack(side="left", padx=(4, 0))
-        tk.Button(top, text="Delete", command=self.delete_task).pack(side="left", padx=4)
+        b = tk.Button(top, text="Rename", command=self.rename_task)
+        b.pack(side="left", padx=(4, 0))
+        self.task_action_buttons.append(b)
+        b = tk.Button(top, text="Delete", command=self.delete_task)
+        b.pack(side="left", padx=4)
+        self.task_action_buttons.append(b)
         tk.Label(top, text="Mark as:").pack(side="left", padx=(16, 4))
         for status in STATUSES:
-            tk.Button(top, text=ICONS[status], command=lambda s=status: self.set_status(s)).pack(
-                side="left", padx=2
-            )
+            b = tk.Button(top, text=ICONS[status], command=lambda s=status: self.set_status(s))
+            b.pack(side="left", padx=2)
+            self.status_buttons.append(b)
         self.progress = tk.Label(top, text="", fg="gray40")
         self.progress.pack(side="right")
 
@@ -129,6 +216,8 @@ class NotesApp(tk.Tk):
         tsb.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.on_task_select)
         self.tree.bind("<Double-1>", self.cycle_status)
+        self.tree.bind("<Delete>", lambda e: self.delete_task())
+        self.tree.bind("<Return>", lambda e: self.cycle_status())
 
         self.desc_label = tk.Label(tasks_tab, text="Description", anchor="w",
                                    font=("Segoe UI", 10, "bold"))
@@ -154,15 +243,108 @@ class NotesApp(tk.Tk):
         nsb.pack(side="right", fill="y")
         self.notes.bind("<KeyRelease>", self.schedule_save)
 
-    def refresh_list(self, select=None):
-        self.listbox.delete(0, "end")
-        for name in self.data:
-            self.listbox.insert("end", name)
-        if select in self.data:
-            idx = list(self.data).index(select)
-            self.listbox.selection_set(idx)
-            self.listbox.see(idx)
+        self.bind("<Control-n>", lambda e: self.add_subject())
+        self.bind("<Control-t>", lambda e: self.add_task())
 
+    # -------------------------------------------------- subject sidebar rows
+    def _on_rows_configure(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self._rows_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        step = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(step, "units")
+
+    def _bar_style(self, frac):
+        if frac >= 1.0:
+            return "Done.Horizontal.TProgressbar"
+        if frac == 0.0:
+            return "Empty.Horizontal.TProgressbar"
+        return "Subject.Horizontal.TProgressbar"
+
+    def _make_subject_row(self, name):
+        tasks = self.data[name]["tasks"]
+        total = len(tasks)
+        done = sum(t["status"] == DONE for t in tasks)
+        frac = (done / total) if total else 0.0
+
+        bg = self.rows.cget("bg")
+        row = tk.Frame(self.rows, padx=6, pady=4, bd=0,
+                       highlightthickness=1, highlightbackground=bg)
+        row.pack(fill="x", padx=2, pady=2)
+
+        top = tk.Frame(row)
+        top.pack(fill="x")
+        label = tk.Label(top, text=name, anchor="w", font=("Segoe UI", 10, "bold"))
+        label.pack(side="left", fill="x", expand=True)
+        count = tk.Label(top, text=(f"{done}/{total}" if total else "\u2013"),
+                         anchor="e", fg="gray35", font=("Segoe UI", 9))
+        count.pack(side="right")
+
+        bar = ttk.Progressbar(row, style=self._bar_style(frac),
+                              mode="determinate", maximum=1.0, value=frac)
+        bar.pack(fill="x", pady=(3, 0))
+
+        self.row_widgets[name] = {
+            "row": row, "top": top, "label": label, "count": count, "bar": bar,
+        }
+
+        for w in (row, top, label, count, bar):
+            w.bind("<Button-1>", lambda _e, n=name: self.select_subject(n))
+            w.bind("<MouseWheel>", self._on_mousewheel)
+            w.bind("<Button-4>", lambda _e: self.canvas.yview_scroll(-1, "units"))
+            w.bind("<Button-5>", lambda _e: self.canvas.yview_scroll(1, "units"))
+
+    def _paint_selection(self):
+        base = self.rows.cget("bg")
+        for name, w in self.row_widgets.items():
+            selected = (name == self.current)
+            bg = SELECTED_BG if selected else base
+            w["row"].configure(bg=bg,
+                               highlightbackground=SELECTED_BORDER if selected else base)
+            w["top"].configure(bg=bg)
+            w["label"].configure(bg=bg)
+            w["count"].configure(bg=bg)
+
+    def update_progress_bars(self, name=None):
+        """Refresh one subject's progress bar (or all of them when name is None)."""
+        names = [name] if name is not None else list(self.row_widgets)
+        for n in names:
+            if n not in self.row_widgets:
+                continue
+            w = self.row_widgets[n]
+            tasks = self.data.get(n, {}).get("tasks", [])
+            total = len(tasks)
+            done = sum(t["status"] == DONE for t in tasks)
+            frac = (done / total) if total else 0.0
+            w["bar"].configure(value=frac, style=self._bar_style(frac))
+            w["count"].configure(text=(f"{done}/{total}" if total else "\u2013"))
+
+    def select_subject(self, name):
+        if name == self.current:
+            return
+        self.save_current()
+        self.show_subject(name)
+
+    def refresh_list(self):
+        y = self.canvas.yview()[0] if self.row_widgets else 0.0
+        for child in self.rows.winfo_children():
+            child.destroy()
+        self.row_widgets = {}
+        if not self.data:
+            tk.Label(self.rows,
+                     text="No subjects yet.\nClick Add to get started.",
+                     fg="gray45", justify="center", pady=20).pack(fill="x")
+        for name in self.data:
+            self._make_subject_row(name)
+        self.rows.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.yview_moveto(y)
+        self._paint_selection()
+
+    # ------------------------------------------------------------- subjects
     def show_subject(self, name):
         self.current = name
         self.title_label.config(text=name)
@@ -172,6 +354,7 @@ class NotesApp(tk.Tk):
         self.notes.edit_reset()
         self.current_task = None
         self.refresh_tasks()
+        self._paint_selection()
 
     def clear_editor(self):
         self.current = None
@@ -181,16 +364,7 @@ class NotesApp(tk.Tk):
         self.notes.delete("1.0", "end")
         self.notes.config(state="disabled")
         self.refresh_tasks()
-
-    def on_subject_select(self, _event=None):
-        sel = self.listbox.curselection()
-        if not sel:
-            return
-        name = self.listbox.get(sel[0])
-        if name == self.current:
-            return
-        self.save_current()
-        self.show_subject(name)
+        self._paint_selection()
 
     def add_subject(self):
         name = simpledialog.askstring("Add subject", "Subject name:", parent=self)
@@ -203,7 +377,8 @@ class NotesApp(tk.Tk):
         self.save_current()
         self.data[name] = {"notes": "", "tasks": []}
         self.write_file()
-        self.refresh_list(select=name)
+        self.current = name
+        self.refresh_list()
         self.show_subject(name)
 
     def rename_subject(self):
@@ -222,7 +397,7 @@ class NotesApp(tk.Tk):
         self.write_file()
         self.current = new
         self.title_label.config(text=new)
-        self.refresh_list(select=new)
+        self.refresh_list()
 
     def delete_subject(self):
         if not self.current:
@@ -236,8 +411,14 @@ class NotesApp(tk.Tk):
         self.clear_editor()
         self.refresh_list()
 
+    # ---------------------------------------------------------------- tasks
     def tasks(self):
         return self.data[self.current]["tasks"] if self.current else []
+
+    def _sync_task_buttons(self):
+        state = "normal" if self.current_task is not None else "disabled"
+        for b in self.status_buttons + self.task_action_buttons:
+            b.configure(state=state)
 
     def refresh_tasks(self, select=None):
         self._refreshing = True
@@ -249,7 +430,6 @@ class NotesApp(tk.Tk):
         if select is not None and select < len(tasks):
             self.tree.selection_set(str(select))
             self.tree.see(str(select))
-        self._refreshing = False
 
         done = sum(t["status"] == DONE for t in tasks)
         self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
@@ -257,15 +437,21 @@ class NotesApp(tk.Tk):
             self.show_task(select)
         else:
             self.clear_task_editor()
+        self._refreshing = False
+
+        # Only the current subject's bar can have changed.
+        self.update_progress_bars(self.current)
 
     def show_task(self, idx):
         self.current_task = idx
         t = self.tasks()[idx]
-        self.desc_label.config(text=f"Description \u2014 {t['title']}")
+        title = t["title"] if len(t["title"]) <= 50 else t["title"][:47] + "\u2026"
+        self.desc_label.config(text=f"Description \u2014 {title}")
         self.desc.config(state="normal")
         self.desc.delete("1.0", "end")
         self.desc.insert("1.0", t["description"])
         self.desc.edit_reset()
+        self._sync_task_buttons()
 
     def clear_task_editor(self):
         self.current_task = None
@@ -273,6 +459,7 @@ class NotesApp(tk.Tk):
         self.desc.config(state="normal")
         self.desc.delete("1.0", "end")
         self.desc.config(state="disabled")
+        self._sync_task_buttons()
 
     def on_task_select(self, _event=None):
         if self._refreshing:
@@ -314,13 +501,15 @@ class NotesApp(tk.Tk):
     def delete_task(self):
         if self.current_task is None:
             return
-        t = self.tasks()[self.current_task]
+        idx = self.current_task
+        t = self.tasks()[idx]
         if not messagebox.askyesno("Delete task", f'Delete task "{t["title"]}"?'):
             return
-        del self.tasks()[self.current_task]
+        del self.tasks()[idx]
         self.current_task = None
         self.write_file()
-        self.refresh_tasks()
+        n = len(self.tasks())
+        self.refresh_tasks(select=min(idx, n - 1) if n else None)
 
     def set_status(self, status):
         if self.current_task is None:
