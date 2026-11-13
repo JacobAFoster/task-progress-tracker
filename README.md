@@ -1,118 +1,77 @@
 Subjects & Tasks
 
-A simple desktop app built with Python and tkinter. Create subjects, add tasks to each one, mark them as not done, in progress or done, and write descriptions and free-form notes.
+A small desktop app for keeping notes and task lists, organised by subject. It is built with Python and Tkinter and stores everything in a single JSON file next to the script.
 
-Every subject in the sidebar now has its own progress bar, so you can see at a glance how much of each subject is finished.
+Features
+Subjects sidebar with a progress bar and a done/total count for each subject
+Tasks with three statuses: Not done, In progress, Done
+Per-task descriptions and a free-form notes tab for each subject
+Autosave: saves one second after you stop typing, when you switch subject, and when you close the window
+Safe storage: atomic writes, backups of unreadable files, and a visible warning if a save fails
 Requirements
+Python 3.8 or newer
+Tkinter (included with the standard Python installers for Windows and macOS)
+On Debian/Ubuntu: sudo apt install python3-tk
 
-    Python 3.8 or newer
+No third-party packages are needed.
 
-    tkinter (included with the standard Python installers for Windows and macOS)
-
-On some Linux distributions tkinter is a separate package. On Debian or Ubuntu:
-text
-
-sudo apt install python3-tk
-
-No other dependencies are needed.
 Running
-text
+bash
+python notes_app.py
 
-python subject_notes.py
+subjects.json is created in the same folder as the script the first time you add a subject.
 
-On some systems the command is python3 instead of python.
 Using the app
-Subjects
+Action	How
+Add / rename / delete a subject	Buttons under the sidebar (Ctrl+N adds)
+Add a task	Add task button or Ctrl+T
+Rename / delete a task	Rename / Delete buttons, or Delete key to delete
+Change a task's status	Mark as buttons, or press Enter / double-click to cycle through the statuses
+Edit a description	Select a task, then type in the Description box
+Edit notes	Open the Notes tab
 
-The list on the left holds your subjects.
+Ctrl+N and Ctrl+T also work while you are typing in the description or notes boxes.
 
-    Add creates a new subject.
+Data file
 
-    Rename renames the selected subject.
+Data lives in subjects.json:
 
-    Delete removes the selected subject, along with all of its tasks and notes (you will be asked to confirm).
-
-Each subject row shows:
-
-    the subject name,
-
-    a done/total counter of its tasks,
-
-    a progress bar filled in proportion to how many tasks are marked Done.
-
-Click any row to select that subject; the selected row is highlighted. The sidebar scrolls with the mouse wheel when you have more subjects than fit on screen.
-Tasks
-
-Select a subject and open the Tasks tab.
-
-    Add task creates a task in the selected subject.
-
-    Rename and Delete work on the selected task.
-
-    Mark as sets the selected task to Not done, In progress or Done. Double-clicking a task cycles through the three statuses.
-
-    Select a task and type in the Description box underneath to add details to it. Each task has its own description.
-
-    A counter in the corner shows how many tasks in the subject are done.
-
-In progress tasks are shown in orange and done tasks in green.
-
-Whenever you change a task's status, add or delete a task, the subject's progress bar in the sidebar updates immediately.
-Notes
-
-The Notes tab is a free writing area for the selected subject, separate from its tasks.
-Saving
-
-Everything saves automatically: about a second after you stop typing, whenever you switch subjects or tasks, and when you close the window. There is no save button.
-
-Your data is stored in subjects.json, which is created in the same folder as subject_notes.py. To back up or move your data, copy that file. To start fresh, delete it.
-
-If you have a subjects.json from an earlier notes-only version of the app, it is upgraded automatically and your old notes appear in each subject's Notes tab.
-Data format
-
-subjects.json is plain JSON, so it is easy to read or edit by hand:
 json
-
 {
   "Maths": {
-    "notes": "Exam on Friday.",
+    "notes": "Revise chapter 4",
     "tasks": [
-      {
-        "title": "Finish chapter 4 exercises",
-        "status": "In progress",
-        "description": "Questions 1 to 20, check answers at the back."
-      }
+      { "title": "Past paper", "status": "In progress", "description": "Section B only" }
     ]
   }
 }
 
-Valid task statuses are Not done, In progress and Done.
-What's new in this version
+Valid statuses are Not done, In progress and Done. On load, anything unexpected is cleaned up: older files that stored a subject as a plain string are converted, and missing fields get defaults.
 
-Added
+Backups and error handling
+Atomic saves: data is written to subjects.json.tmp and then swapped in, so a crash mid-write cannot leave a half-written file. The temp file is removed if anything goes wrong.
+Unreadable file: if subjects.json is not valid JSON, the app renames it to subjects.json.corrupt-<timestamp> and starts empty. If it can't be renamed, saving is disabled for the session so the file is never overwritten, and a banner explains why.
+Cleaned-up file: if loading had to change or drop anything, the original text is saved as subjects.json.bak-<timestamp> before the first save overwrites it.
+Failed saves: a red "Not saved" banner stays visible until a write succeeds. You also get a one-time error dialog.
+Encoding: files are read as utf-8-sig, so a UTF-8 BOM added by editors such as Notepad is fine.
+Changes in this version
 
-    A progress bar and done/total counter for every subject in the sidebar.
+Bug fixes:
 
-    A scrollable subject panel with mouse-wheel support and click-to-select rows.
+Ctrl+N / Ctrl+T no longer also trigger Tk's built-in transpose and cursor-down inside text boxes.
+Removed the misleading _refreshing flag; the on_task_select index check already handles queued select events.
+A UTF-8 BOM no longer makes a valid file look corrupt.
+Data that load() cleans up is backed up before being overwritten.
+Progress bar colour and thickness now apply on Windows (the clam theme is used).
+Saving is triggered by <<Modified>>, so paste, cut and undo are saved, and arrow keys no longer trigger a save.
+Changing a status updates only that row, so the description box keeps its cursor and undo history.
+Write failures show a persistent warning instead of a one-time popup.
 
-    The selected subject is highlighted so it is always obvious which one you are editing.
+Also: temp files are cleaned up after a failed save, a pending autosave is cancelled when a subject is deleted, and reused variable names were renamed.
 
-Bug fixes
-
-    Progress information now stays correct after renaming a subject, after adding or deleting tasks, and after changing a task's status.
-
-    The subject list keeps its scroll position when it is refreshed, instead of jumping back to the top.
-
-    Selecting a subject no longer clears the task list or loses the current task's description.
-
-    Switching subjects with unsaved typing no longer discards the text — the pending save is flushed first.
-
-    Deleting the last subject correctly resets the editor instead of leaving stale content on screen.
-
-Optimisations
-
-    Status changes update the progress bars in place rather than rebuilding the whole subject list, so the sidebar no longer flickers.
-
-    Task rows are only redrawn when the task list actually changes, reducing redraw work on every keystroke.
-
-    Duplicate saves are coalesced into a single write when several events fire close together.
+Known limitations
+Double-click cycles a task's status, which is easy to trigger by accident.
+Tasks are identified by list position, and there is no reordering.
+Fonts are set to Segoe UI, so they fall back to a default on macOS and Linux.
+Subject names are case-sensitive (Math and math are different subjects).
+The subject sidebar is not keyboard navigable.
