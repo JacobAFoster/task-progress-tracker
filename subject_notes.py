@@ -6,6 +6,7 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 DATA_FILE = Path(__file__).with_name("subjects.json")
+UI_FILE = Path(__file__).with_name("ui_state.json")
 
 NOT_DONE, IN_PROGRESS, DONE = "Not done", "In progress", "Done"
 STATUSES = [NOT_DONE, IN_PROGRESS, DONE]
@@ -25,16 +26,27 @@ class NotesApp(tk.Tk):
         self._saving_disabled = False
         self._save_job = None
         self._write_error_shown = False
-        self._backup_text = None  # original file text, saved before first overwrite if load() changed data
+        self._refreshing = False
+        self._undo = None
         self.current = None
         self.current_task = None
         self.row_widgets = {}
         self.status_buttons = []
         self.task_action_buttons = []
 
+        self._ui_state = self._load_ui_state()
+        geom = self._ui_state.get("geometry")
+        if isinstance(geom, str):
+            try:
+                self.geometry(geom)
+            except tk.TclError:
+                pass
+
         self.data = self.load()
         self.build_ui()
         self.refresh_list()
+        if self._ui_state.get("current") in self.data:
+            self.show_subject(self._ui_state["current"])
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------------------------------------------------------------- storage
@@ -63,8 +75,7 @@ class NotesApp(tk.Tk):
 
     def load(self):
         try:
-            # utf-8-sig tolerates a BOM added by Notepad and similar editors
-            text = DATA_FILE.read_text(encoding="utf-8-sig")
+            text = DATA_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
             return {}
         except (OSError, UnicodeDecodeError) as e:
@@ -78,7 +89,6 @@ class NotesApp(tk.Tk):
                 ValueError("Root JSON value is not an object.")
             )
 
-        original = copy.deepcopy(raw)
         data = {}
         for name, value in raw.items():
             if isinstance(value, str):
@@ -99,10 +109,6 @@ class NotesApp(tk.Tk):
                 if t.get("status") not in STATUSES:
                     t["status"] = NOT_DONE
             data[name] = value
-
-        # If cleaning changed anything, keep the original before we overwrite it.
-        if data != original:
-            self._backup_text = text
         return data
 
     def write_file(self):
@@ -110,45 +116,40 @@ class NotesApp(tk.Tk):
             return
         tmp = DATA_FILE.with_name(DATA_FILE.name + ".tmp")
         try:
-            if self._backup_text is not None:
-                bak = DATA_FILE.with_name(
-                    f"{DATA_FILE.name}.bak-{int(time.time())}"
-                )
-                bak.write_text(self._backup_text, encoding="utf-8")
-                self._backup_text = None
-            try:
-                tmp.write_text(
-                    json.dumps(self.data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                tmp.replace(DATA_FILE)
-            finally:
-                tmp.unlink(missing_ok=True)
+            tmp.write_text(
+                json.dumps(self.data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(DATA_FILE)
             self._write_error_shown = False
-            self._set_save_warning(False)
+            if getattr(self, "status", None) is not None:
+                self.status.config(text=f"Saved {time.strftime('%H:%M:%S')}")
         except OSError as e:
-            self._set_save_warning(True)
             if not self._write_error_shown:
                 self._write_error_shown = True
                 messagebox.showerror(
                     "Could not save",
                     f"Could not write subjects.json:\n{e}\n\n"
-                    "A warning stays visible until a save succeeds. "
+                    "Further errors will not be shown this session. "
                     "Check disk space and file permissions.",
                     parent=self,
                 )
 
-    def _set_save_warning(self, failed):
-        label = getattr(self, "save_warning", None)
-        if label is None:
-            return
-        if failed:
-            label.config(text="\u26a0  Not saved \u2014 last write failed. "
-                              "Changes are only in memory.",
-                         bg="#fde2e1", fg="#8a1c1c")
-            label.pack(fill="x", pady=(0, 4), before=self.title_label)
-        else:
-            label.pack_forget()
+    def _load_ui_state(self):
+        try:
+            state = json.loads(UI_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _save_ui_state(self):
+        try:
+            UI_FILE.write_text(
+                json.dumps({"geometry": self.geometry(), "current": self.current}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def save_task_desc(self):
         if self.current in self.data and self.current_task is not None:
@@ -178,16 +179,11 @@ class NotesApp(tk.Tk):
         self._save_job = None
         self.save_current()
 
-    def _on_modified(self, event):
-        # <<Modified>> fires for typing, paste, cut, undo, etc. The flag must be
-        # reset or the event will not fire again.
-        w = event.widget
-        if w.edit_modified():
-            w.edit_modified(False)
-            self.schedule_save()
-
     # ------------------------------------------------------------------- UI
     def build_ui(self):
+        self.status = tk.Label(self, text="", anchor="e", fg="gray40")
+        self.status.pack(side="bottom", fill="x", padx=8)
+
         left = tk.Frame(self, padx=8, pady=8)
         left.pack(side="left", fill="y")
         tk.Label(left, text="Subjects", font=("Segoe UI", 11, "bold")).pack(anchor="w")
@@ -208,11 +204,12 @@ class NotesApp(tk.Tk):
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
         self.canvas.bind("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
+        # Wheel over the empty gaps between rows.
+        self.rows.bind("<MouseWheel>", self._on_mousewheel)
+        self.rows.bind("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
+        self.rows.bind("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
 
         style = ttk.Style(self)
-        # The native Windows theme ignores progress bar colour/thickness.
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
         style.configure("Subject.Horizontal.TProgressbar",
                         thickness=9, troughcolor="#e8e8e8")
         style.configure("Done.Horizontal.TProgressbar",
@@ -220,13 +217,13 @@ class NotesApp(tk.Tk):
         style.configure("Empty.Horizontal.TProgressbar",
                         thickness=9, troughcolor="#e8e8e8", background="#a0a0a0")
 
-        subject_buttons = tk.Frame(left)
-        subject_buttons.pack(fill="x")
-        tk.Button(subject_buttons, text="Add", command=self.add_subject).pack(
+        b = tk.Frame(left)
+        b.pack(fill="x")
+        tk.Button(b, text="Add", command=self.add_subject).pack(
             side="left", expand=True, fill="x")
-        tk.Button(subject_buttons, text="Rename", command=self.rename_subject).pack(
+        tk.Button(b, text="Rename", command=self.rename_subject).pack(
             side="left", expand=True, fill="x")
-        tk.Button(subject_buttons, text="Delete", command=self.delete_subject).pack(
+        tk.Button(b, text="Delete", command=self.delete_subject).pack(
             side="left", expand=True, fill="x")
 
         right = tk.Frame(self, padx=8, pady=8)
@@ -241,9 +238,6 @@ class NotesApp(tk.Tk):
                 bg="#fde2e1", fg="#8a1c1c", pady=6,
                 font=("Segoe UI", 10, "bold"),
             ).pack(fill="x", pady=(0, 4))
-
-        # Shown (packed) only while the last write has failed.
-        self.save_warning = tk.Label(right, pady=6, font=("Segoe UI", 10, "bold"))
 
         self.title_label = tk.Label(
             right, text="Select or add a subject",
@@ -260,20 +254,33 @@ class NotesApp(tk.Tk):
         top = tk.Frame(tasks_tab)
         top.pack(fill="x")
         tk.Button(top, text="Add task", command=self.add_task).pack(side="left")
-        btn = tk.Button(top, text="Rename", command=self.rename_task)
-        btn.pack(side="left", padx=(4, 0))
-        self.task_action_buttons.append(btn)
-        btn = tk.Button(top, text="Delete", command=self.delete_task)
-        btn.pack(side="left", padx=4)
-        self.task_action_buttons.append(btn)
+        b = tk.Button(top, text="Rename", command=self.rename_task)
+        b.pack(side="left", padx=(4, 0))
+        self.task_action_buttons.append(b)
+        b = tk.Button(top, text="Delete", command=self.delete_task)
+        b.pack(side="left", padx=4)
+        self.task_action_buttons.append(b)
+        for text, delta in (("\u2191", -1), ("\u2193", 1)):
+            b = tk.Button(top, text=text, width=2,
+                          command=lambda d=delta: self.move_task(d))
+            b.pack(side="left", padx=(0, 2))
+            self.task_action_buttons.append(b)
         tk.Label(top, text="Mark as:").pack(side="left", padx=(16, 4))
         for status in STATUSES:
-            btn = tk.Button(top, text=ICONS[status],
-                            command=lambda s=status: self.set_status(s))
-            btn.pack(side="left", padx=2)
-            self.status_buttons.append(btn)
+            b = tk.Button(top, text=ICONS[status],
+                          command=lambda s=status: self.set_status(s))
+            b.pack(side="left", padx=2)
+            self.status_buttons.append(b)
         self.progress = tk.Label(top, text="", fg="gray40")
         self.progress.pack(side="right")
+
+        ff = tk.Frame(tasks_tab)
+        ff.pack(fill="x", pady=(6, 0))
+        tk.Label(ff, text="Search:").pack(side="left")
+        self.filter_var = tk.StringVar()
+        fe = tk.Entry(ff, textvariable=self.filter_var)
+        fe.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self.filter_var.trace_add("write", self._on_filter_change)
 
         tf = tk.Frame(tasks_tab)
         tf.pack(fill="both", expand=True, pady=6)
@@ -295,6 +302,8 @@ class NotesApp(tk.Tk):
         self.tree.bind("<Double-1>", self._on_task_double_click)
         self.tree.bind("<Return>", lambda e: self.cycle_status())
         self.tree.bind("<Delete>", lambda e: self.delete_task())
+        self.tree.bind("<Control-Up>", self._move_up)
+        self.tree.bind("<Control-Down>", self._move_down)
 
         self.desc_label = tk.Label(tasks_tab, text="Description", anchor="w",
                                    font=("Segoe UI", 10, "bold"))
@@ -307,7 +316,7 @@ class NotesApp(tk.Tk):
         self.desc.config(yscrollcommand=dsb.set)
         self.desc.pack(side="left", fill="both", expand=True)
         dsb.pack(side="right", fill="y")
-        self.desc.bind("<<Modified>>", self._on_modified)
+        self.desc.bind("<KeyRelease>", self.schedule_save)
 
         notes_tab = tk.Frame(tabs, padx=6, pady=6)
         tabs.add(notes_tab, text="Notes")
@@ -319,24 +328,18 @@ class NotesApp(tk.Tk):
         self.notes.config(yscrollcommand=nsb.set)
         self.notes.pack(side="left", fill="both", expand=True)
         nsb.pack(side="right", fill="y")
-        self.notes.bind("<<Modified>>", self._on_modified)
+        self.notes.bind("<KeyRelease>", self.schedule_save)
 
-        # Shortcuts. Text widgets have built-in Ctrl+N / Ctrl+T (emacs-style
-        # cursor-down / transpose), so bind on them too and return "break" to
-        # stop the class binding from also running.
-        def shortcut(action):
-            def handler(_event=None):
-                action()
-                return "break"
-            return handler
-
-        self.bind("<Control-n>", shortcut(self.add_subject))
-        self.bind("<Control-t>", shortcut(self.add_task))
-        for w in (self.desc, self.notes):
-            w.bind("<Control-n>", shortcut(self.add_subject))
-            w.bind("<Control-t>", shortcut(self.add_task))
+        self.bind("<Control-n>", lambda e: self.add_subject())
+        self.bind("<Control-t>", lambda e: self.add_task())
+        self.bind_all("<Control-z>", self._on_ctrl_z)
 
         self._sync_task_buttons()
+
+    def _on_filter_change(self, *_args):
+        if self._refreshing:
+            return
+        self.refresh_tasks(select=self.current_task)
 
     # -------------------------------------------------- subject sidebar rows
     def _on_rows_configure(self, _event=None):
@@ -449,8 +452,9 @@ class NotesApp(tk.Tk):
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", self.data[name]["notes"])
         self.notes.edit_reset()
-        self.notes.edit_modified(False)  # loading is not a user edit
         self.current_task = None
+        if self.filter_var.get():
+            self.filter_var.set("")
         self.refresh_tasks()
         self._paint_selection()
 
@@ -460,7 +464,6 @@ class NotesApp(tk.Tk):
         self.title_label.config(text="Select or add a subject")
         self.notes.config(state="normal")
         self.notes.delete("1.0", "end")
-        self.notes.edit_modified(False)
         self.notes.config(state="disabled")
         self.refresh_tasks()
         self._paint_selection()
@@ -508,9 +511,8 @@ class NotesApp(tk.Tk):
             parent=self,
         ):
             return
-        if self._save_job:
-            self.after_cancel(self._save_job)
-            self._save_job = None
+        self._undo = ("subject", self.current,
+                      copy.deepcopy(self.data[self.current]))
         del self.data[self.current]
         self.write_file()
         self.clear_editor()
@@ -525,31 +527,42 @@ class NotesApp(tk.Tk):
         for b in self.status_buttons + self.task_action_buttons:
             b.configure(state=state)
 
-    def _update_task_progress(self):
+    def _visible_indices(self):
         tasks = self.tasks()
-        done = sum(t["status"] == DONE for t in tasks)
-        self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
-        self.update_progress_bars(self.current)
+        q = self.filter_var.get().strip().lower()
+        if not q:
+            return list(range(len(tasks)))
+        return [i for i, t in enumerate(tasks)
+                if q in t["title"].lower() or q in t["description"].lower()]
 
     def refresh_tasks(self, select=None):
-        # on_task_select ignores the queued <<TreeviewSelect>> events this
-        # triggers because the selected index already equals current_task.
-        self.tree.delete(*self.tree.get_children())
-        tasks = self.tasks()
-        for i, t in enumerate(tasks):
-            self.tree.insert(
-                "", "end", iid=str(i),
-                values=(ICONS[t["status"]], t["title"]),
-                tags=(t["status"],),
-            )
-        valid = select is not None and 0 <= select < len(tasks)
-        if valid:
-            self.tree.selection_set(str(select))
-            self.tree.see(str(select))
-            self.show_task(select)
-        else:
-            self.clear_task_editor()
-        self._update_task_progress()
+        self._refreshing = True
+        try:
+            self.tree.delete(*self.tree.get_children())
+            tasks = self.tasks()
+            visible = self._visible_indices()
+            for i in visible:
+                t = tasks[i]
+                self.tree.insert(
+                    "", "end", iid=str(i),
+                    values=(ICONS[t["status"]], t["title"]),
+                    tags=(t["status"],),
+                )
+
+            done = sum(t["status"] == DONE for t in tasks)
+            self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
+
+            if select is not None and select in visible:
+                self.tree.selection_set(str(select))
+                self.tree.see(str(select))
+                self.show_task(select)
+            else:
+                self.current_task = None
+                self.clear_task_editor()
+        finally:
+            self._refreshing = False
+
+        self.update_progress_bars(self.current)
 
     def show_task(self, idx):
         self.current_task = idx
@@ -562,7 +575,6 @@ class NotesApp(tk.Tk):
         self.desc.delete("1.0", "end")
         self.desc.insert("1.0", t["description"])
         self.desc.edit_reset()
-        self.desc.edit_modified(False)  # loading is not a user edit
         self._sync_task_buttons()
 
     def clear_task_editor(self):
@@ -570,11 +582,12 @@ class NotesApp(tk.Tk):
         self.desc_label.config(text="Description")
         self.desc.config(state="normal")
         self.desc.delete("1.0", "end")
-        self.desc.edit_modified(False)
         self.desc.config(state="disabled")
         self._sync_task_buttons()
 
     def on_task_select(self, _event=None):
+        if self._refreshing:
+            return
         sel = self.tree.selection()
         if not sel:
             return
@@ -596,6 +609,8 @@ class NotesApp(tk.Tk):
         self.tasks().append({"title": title.strip(), "status": NOT_DONE,
                              "description": ""})
         self.write_file()
+        if self.filter_var.get():
+            self.filter_var.set("")  # trace refreshes; ensures new task is visible
         self.refresh_tasks(select=len(self.tasks()) - 1)
         self.desc.focus_set()
 
@@ -620,23 +635,42 @@ class NotesApp(tk.Tk):
         if not messagebox.askyesno("Delete task", f'Delete task "{t["title"]}"?',
                                    parent=self):
             return
+        self._undo = ("task", self.current, idx, copy.deepcopy(t))
         del self.tasks()[idx]
         self.current_task = None
         self.write_file()
         n = len(self.tasks())
         self.refresh_tasks(select=min(idx, n - 1) if n else None)
 
+    def move_task(self, delta):
+        if self.current_task is None:
+            return
+        tasks = self.tasks()
+        j = self.current_task + delta
+        if not (0 <= j < len(tasks)):
+            return
+        self.save_task_desc()
+        i = self.current_task
+        tasks[i], tasks[j] = tasks[j], tasks[i]
+        self.write_file()
+        self.refresh_tasks(select=j)
+
+    def _move_up(self, _event=None):
+        self.move_task(-1)
+        return "break"
+
+    def _move_down(self, _event=None):
+        self.move_task(1)
+        return "break"
+
     def set_status(self, status):
         if self.current_task is None:
             return
         idx = self.current_task
-        task = self.tasks()[idx]
-        task["status"] = status
-        # Update just this row so the description editor keeps its cursor and undo history.
-        self.tree.item(str(idx), values=(ICONS[status], task["title"]),
-                       tags=(status,))
-        self._update_task_progress()
-        self.save_current()
+        self.save_task_desc()
+        self.tasks()[idx]["status"] = status
+        self.write_file()
+        self.refresh_tasks(select=idx)
 
     def cycle_status(self, _event=None):
         if self.current_task is None:
@@ -649,8 +683,45 @@ class NotesApp(tk.Tk):
             return
         self.cycle_status()
 
+    # ------------------------------------------------------------------ undo
+    def _on_ctrl_z(self, _event=None):
+        focus = self.focus_get()
+        # Let Text / Entry widgets handle their own Ctrl-Z.
+        if isinstance(focus, (tk.Text, tk.Entry, ttk.Entry)):
+            return
+        if self.undo_delete():
+            return "break"
+
+    def undo_delete(self):
+        undo = self._undo
+        self._undo = None
+        if not undo:
+            return False
+        if undo[0] == "task":
+            _, subject, idx, task = undo
+            if subject in self.data:
+                tasks = self.data[subject]["tasks"]
+                tasks.insert(min(idx, len(tasks)), task)
+                self.write_file()
+                if subject == self.current:
+                    self.refresh_tasks(select=idx)
+                else:
+                    self.show_subject(subject)
+                    self.refresh_tasks(select=idx)
+                self.update_progress_bars(subject)
+                self.status.config(text=f'Undo: restored task "{task["title"]}"')
+        else:
+            _, name, payload = undo
+            self.data[name] = payload
+            self.write_file()
+            self.refresh_list()
+            self.show_subject(name)
+            self.status.config(text=f'Undo: restored subject "{name}"')
+        return True
+
     def on_close(self):
         self.save_current()
+        self._save_ui_state()
         self.destroy()
 
 
