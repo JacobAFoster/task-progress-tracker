@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk, colorchooser
 
 DATA_FILE = Path(__file__).with_name("subjects.json")
 UI_FILE = Path(__file__).with_name("ui_state.json")
@@ -26,17 +26,50 @@ class T:
     TEXT          = "#1f2430"
     TEXT_MUTED    = "#6b7280"
     TEXT_FAINT    = "#9aa1ab"
-
     ACCENT        = "#2f6fed"
     ACCENT_HOVER  = "#1f5ad6"
     ACCENT_SOFT   = "#e7efff"
-
     SUCCESS       = "#1a9d4b"
     SUCCESS_SOFT  = "#e3f6eb"
     WARNING       = "#c97a00"
     WARNING_SOFT  = "#fbeed1"
     DANGER        = "#d23b3b"
     DANGER_SOFT   = "#fde3e3"
+
+
+DEFAULT_COLORS = {k: getattr(T, k) for k in vars(T)
+                  if not k.startswith("_") and isinstance(getattr(T, k), str)}
+
+COLOR_GROUPS = [
+    ("App surfaces", ["BG", "SURFACE", "SURFACE_ALT", "HOVER"]),
+    ("Borders",      ["BORDER", "BORDER_STRONG"]),
+    ("Text",         ["TEXT", "TEXT_MUTED", "TEXT_FAINT"]),
+    ("Accent",       ["ACCENT", "ACCENT_HOVER", "ACCENT_SOFT"]),
+    ("Success",      ["SUCCESS", "SUCCESS_SOFT"]),
+    ("Warning",      ["WARNING", "WARNING_SOFT"]),
+    ("Danger",       ["DANGER", "DANGER_SOFT"]),
+]
+
+COLOR_LABELS = {
+    "BG":            "App background",
+    "SURFACE":       "Surface",
+    "SURFACE_ALT":   "Surface alt",
+    "HOVER":         "Hover",
+    "BORDER":        "Border",
+    "BORDER_STRONG": "Border strong",
+    "TEXT":          "Text",
+    "TEXT_MUTED":    "Text muted",
+    "TEXT_FAINT":    "Text faint",
+    "ACCENT":        "Accent",
+    "ACCENT_HOVER":  "Accent hover",
+    "ACCENT_SOFT":   "Accent soft",
+    "SUCCESS":       "Success",
+    "SUCCESS_SOFT":  "Success soft",
+    "WARNING":       "Warning",
+    "WARNING_SOFT":  "Warning soft",
+    "DANGER":        "Danger",
+    "DANGER_SOFT":   "Danger soft",
+}
 
 
 def pick_font(root, *candidates, default="TkDefaultFont"):
@@ -48,7 +81,6 @@ def pick_font(root, *candidates, default="TkDefaultFont"):
 
 
 def enable_hidpi(root):
-    """Enable DPI awareness on Windows and return the scale factor."""
     if sys.platform != "win32":
         return 1.0
     try:
@@ -65,8 +97,8 @@ def enable_hidpi(root):
 
 
 def setup_theme(root):
-    ui   = pick_font(root, "Segoe UI Variable", "Segoe UI", "SF Pro Text",
-                     "Helvetica Neue", "Inter", "Cantarell", "DejaVu Sans")
+    ui = pick_font(root, "Segoe UI Variable", "Segoe UI", "SF Pro Text",
+                   "Helvetica Neue", "Inter", "Cantarell", "DejaVu Sans")
     mono = pick_font(root, "Cascadia Mono", "SF Mono", "JetBrains Mono",
                      "Menlo", "Consolas", "DejaVu Sans Mono")
 
@@ -76,7 +108,6 @@ def setup_theme(root):
     except tk.TclError:
         pass
 
-    # base
     style.configure(".", background=T.BG, foreground=T.TEXT, font=(ui, 10))
     style.configure("TFrame",              background=T.BG)
     style.configure("Surface.TFrame",      background=T.SURFACE)
@@ -88,7 +119,6 @@ def setup_theme(root):
     style.configure("H2.TLabel",           background=T.BG, foreground=T.TEXT, font=(ui, 12, "bold"))
     style.configure("Section.TLabel",      background=T.SURFACE, foreground=T.TEXT, font=(ui, 10, "bold"))
 
-    # buttons
     style.configure("Accent.TButton",
         background=T.ACCENT, foreground="white", borderwidth=0,
         focuscolor=T.ACCENT, padding=(14, 7), font=(ui, 10, "bold"))
@@ -118,7 +148,6 @@ def setup_theme(root):
         background=[("active", T.DANGER_SOFT)],
         foreground=[("active", T.DANGER), ("disabled", T.TEXT_FAINT)])
 
-    # notebook
     style.configure("TNotebook", background=T.BG, borderwidth=0, tabmargins=(0, 2, 0, 0))
     style.configure("TNotebook.Tab", background=T.BG, foreground=T.TEXT_MUTED,
                     padding=(18, 9), borderwidth=0, font=(ui, 10, "bold"))
@@ -126,7 +155,6 @@ def setup_theme(root):
         background=[("selected", T.SURFACE)],
         foreground=[("selected", T.TEXT)])
 
-    # treeview
     style.configure("Treeview",
         background=T.SURFACE, fieldbackground=T.SURFACE, foreground=T.TEXT,
         rowheight=30, borderwidth=0, font=(ui, 10))
@@ -139,7 +167,6 @@ def setup_theme(root):
         background=[("selected", T.ACCENT_SOFT)],
         foreground=[("selected", T.TEXT)])
 
-    # scrollbar
     style.configure("Vertical.TScrollbar",
         background=T.SURFACE_ALT, troughcolor=T.SURFACE,
         borderwidth=0, arrowcolor=T.TEXT_MUTED)
@@ -149,8 +176,9 @@ def setup_theme(root):
 
 # ---------------------------------------------------------- custom widgets
 class CustomProgress(tk.Frame):
-    """Simple flat progress bar with pixel-free colour control."""
-    def __init__(self, parent, height=6, fill=T.ACCENT, trough=T.BORDER, **kw):
+    def __init__(self, parent, height=6, fill=None, trough=None, **kw):
+        if fill   is None: fill   = T.ACCENT
+        if trough is None: trough = T.BORDER
         super().__init__(parent, bg=trough, height=height, **kw)
         self.pack_propagate(False)
         self._fill = tk.Frame(self, bg=fill)
@@ -163,7 +191,6 @@ class CustomProgress(tk.Frame):
 
 
 class Tooltip:
-    """Hover tooltip."""
     def __init__(self, widget, text, delay=500):
         self.widget = widget
         self.text   = text
@@ -214,7 +241,6 @@ class Tooltip:
 
 
 def make_editor(parent, font_family, **kw):
-    """Styled Text widget with a focus ring."""
     return tk.Text(
         parent, font=(font_family, 10), wrap="word", undo=True,
         bd=0, relief="flat",
@@ -232,12 +258,29 @@ class NotesApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self._scale = enable_hidpi(self)
+
+        self._ui_state = self._load_ui_state()
+
+        # apply any saved theme overrides before building the UI
+        saved_theme = self._ui_state.get("theme", {})
+        if isinstance(saved_theme, dict):
+            for k, v in saved_theme.items():
+                if hasattr(T, k) and isinstance(v, str):
+                    setattr(T, k, v)
+
         self._ui_font, self._mono_font = setup_theme(self)
+        self.configure(bg=T.BG)
 
         self.title("Subjects & Tasks")
-        self.configure(bg=T.BG)
         self.geometry(f"{int(1000 * self._scale)}x{int(620 * self._scale)}")
         self.minsize(int(700 * self._scale), int(420 * self._scale))
+
+        geom = self._ui_state.get("geometry")
+        if isinstance(geom, str):
+            try:
+                self.geometry(geom)
+            except tk.TclError:
+                pass
 
         self._saving_disabled = False
         self._save_job = None
@@ -249,14 +292,6 @@ class NotesApp(tk.Tk):
         self.row_widgets = {}
         self.status_buttons = []
         self.task_action_buttons = []
-
-        self._ui_state = self._load_ui_state()
-        geom = self._ui_state.get("geometry")
-        if isinstance(geom, str):
-            try:
-                self.geometry(geom)
-            except tk.TclError:
-                pass
 
         self.data = self.load()
         self.build_ui()
@@ -281,8 +316,7 @@ class NotesApp(tk.Tk):
                if moved is not None else
                "The old file could not be moved; saving is disabled "
                "for this session so it is not overwritten."),
-            parent=self,
-        )
+            parent=self)
         return {}
 
     def load(self):
@@ -353,10 +387,13 @@ class NotesApp(tk.Tk):
         return state if isinstance(state, dict) else {}
 
     def _save_ui_state(self):
+        theme = {k: getattr(T, k) for k in DEFAULT_COLORS}
         try:
             UI_FILE.write_text(
                 json.dumps({"geometry": self.geometry(),
-                            "current": self.current}),
+                            "current": self.current,
+                            "theme":   theme},
+                           indent=2),
                 encoding="utf-8")
         except OSError:
             pass
@@ -390,7 +427,6 @@ class NotesApp(tk.Tk):
 
     # --------------------------------------------------------------- UI
     def build_ui(self):
-        # status bar (bottom)
         self.status = tk.Label(self, text="", anchor="e",
                                bg=T.BG, fg=T.TEXT_FAINT,
                                font=(self._ui_font, 9), padx=12, pady=4)
@@ -458,12 +494,12 @@ class NotesApp(tk.Tk):
                                        font=(self._ui_font, 10))
         self.subtitle_label.pack(side="right")
 
-        tabs = ttk.Notebook(right)
-        tabs.pack(fill="both", expand=True)
+        self.tabs = ttk.Notebook(right)
+        self.tabs.pack(fill="both", expand=True)
 
         # ---- tasks tab ----
-        tasks_tab = tk.Frame(tabs, bg=T.SURFACE, padx=14, pady=14)
-        tabs.add(tasks_tab, text="Tasks")
+        tasks_tab = tk.Frame(self.tabs, bg=T.SURFACE, padx=14, pady=14)
+        self.tabs.add(tasks_tab, text="Tasks")
 
         top = tk.Frame(tasks_tab, bg=T.SURFACE)
         top.pack(fill="x")
@@ -481,8 +517,7 @@ class NotesApp(tk.Tk):
         b.pack(side="left", padx=(4, 0))
         self.task_action_buttons.append(b)
 
-        ttk.Separator(top, orient="vertical").pack(
-            side="left", fill="y", padx=10, pady=4)
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10, pady=4)
 
         for text, delta in (("\u2191", -1), ("\u2193", 1)):
             b = ttk.Button(top, text=text, width=3, style="Ghost.TButton",
@@ -490,8 +525,7 @@ class NotesApp(tk.Tk):
             b.pack(side="left", padx=(0, 2))
             self.task_action_buttons.append(b)
 
-        ttk.Separator(top, orient="vertical").pack(
-            side="left", fill="y", padx=10, pady=4)
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10, pady=4)
 
         tk.Label(top, text="Mark as:", bg=T.SURFACE, fg=T.TEXT_MUTED,
                  font=(self._ui_font, 10)).pack(side="left", padx=(0, 6))
@@ -506,7 +540,6 @@ class NotesApp(tk.Tk):
                                  font=(self._ui_font, 9))
         self.progress.pack(side="right")
 
-        # search
         ff = tk.Frame(tasks_tab, bg=T.SURFACE)
         ff.pack(fill="x", pady=(12, 0))
         tk.Label(ff, text="Search", bg=T.SURFACE, fg=T.TEXT_MUTED,
@@ -520,7 +553,6 @@ class NotesApp(tk.Tk):
         fe.pack(side="left", fill="x", expand=True, ipady=4)
         self.filter_var.trace_add("write", self._on_filter_change)
 
-        # treeview
         tf = tk.Frame(tasks_tab, bg=T.SURFACE)
         tf.pack(fill="both", expand=True, pady=(12, 0))
         self.tree = ttk.Treeview(tf, columns=("status", "title"),
@@ -545,7 +577,6 @@ class NotesApp(tk.Tk):
         self.tree.bind("<Control-Up>",   self._move_up)
         self.tree.bind("<Control-Down>", self._move_down)
 
-        # description
         self.desc_label = tk.Label(tasks_tab, text="Description", anchor="w",
                                    bg=T.SURFACE, fg=T.TEXT,
                                    font=(self._ui_font, 10, "bold"))
@@ -560,8 +591,8 @@ class NotesApp(tk.Tk):
         self.desc.bind("<KeyRelease>", self.schedule_save)
 
         # ---- notes tab ----
-        notes_tab = tk.Frame(tabs, bg=T.SURFACE, padx=14, pady=14)
-        tabs.add(notes_tab, text="Notes")
+        notes_tab = tk.Frame(self.tabs, bg=T.SURFACE, padx=14, pady=14)
+        self.tabs.add(notes_tab, text="Notes")
         nf = tk.Frame(notes_tab, bg=T.SURFACE)
         nf.pack(fill="both", expand=True)
         self.notes = make_editor(nf, self._ui_font, state="disabled")
@@ -571,18 +602,157 @@ class NotesApp(tk.Tk):
         nsb.pack(side="right", fill="y")
         self.notes.bind("<KeyRelease>", self.schedule_save)
 
-        # keyboard shortcuts
+        # ---- settings tab ----
+        self._build_settings_tab()
+
         self.bind("<Control-n>", lambda e: self.add_subject())
         self.bind("<Control-t>", lambda e: self.add_task())
         self.bind_all("<Control-z>", self._on_ctrl_z)
 
-        # tooltips
         Tooltip(self.status_buttons[0], "Mark as Not done")
         Tooltip(self.status_buttons[1], "Mark as In progress")
         Tooltip(self.status_buttons[2], "Mark as Done")
 
         self._sync_task_buttons()
 
+    # ------------------------------------------------------------ settings
+    def _build_settings_tab(self):
+        tab = tk.Frame(self.tabs, bg=T.SURFACE, padx=14, pady=14)
+        self.tabs.add(tab, text="\u2699  Settings")
+
+        head = tk.Frame(tab, bg=T.SURFACE)
+        head.pack(fill="x", pady=(0, 4))
+        tk.Label(head, text="Appearance", anchor="w",
+                 bg=T.SURFACE, fg=T.TEXT,
+                 font=(self._ui_font, 14, "bold")).pack(side="left")
+        ttk.Button(head, text="Reset to defaults", style="Secondary.TButton",
+                   command=self._reset_theme).pack(side="right")
+
+        tk.Label(tab, text="Click any swatch to change a colour. "
+                          "Changes apply instantly and are saved automatically.",
+                 anchor="w", bg=T.SURFACE, fg=T.TEXT_MUTED,
+                 font=(self._ui_font, 10),
+                 justify="left").pack(fill="x", pady=(0, 12))
+
+        # scrollable inner area
+        wrap = tk.Frame(tab, bg=T.SURFACE)
+        wrap.pack(fill="both", expand=True)
+        canvas = tk.Canvas(wrap, bg=T.SURFACE, highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        canvas.config(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        inner = tk.Frame(canvas, bg=T.SURFACE)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win_id, width=e.width))
+
+        for group_title, tokens in COLOR_GROUPS:
+            group = tk.Frame(inner, bg=T.SURFACE)
+            group.pack(fill="x", pady=(4, 10))
+            tk.Label(group, text=group_title, anchor="w",
+                     bg=T.SURFACE, fg=T.TEXT,
+                     font=(self._ui_font, 11, "bold")).pack(fill="x", pady=(0, 4))
+            for token in tokens:
+                self._make_color_row(group, token)
+
+        # wheel support on every settings widget
+        def _bind_wheel(widget):
+            widget.bind("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(
+                            -1 if e.delta > 0 else 1, "units"), add="+")
+            widget.bind("<Button-4>",
+                        lambda e: canvas.yview_scroll(-1, "units"), add="+")
+            widget.bind("<Button-5>",
+                        lambda e: canvas.yview_scroll(1, "units"), add="+")
+            for c in widget.winfo_children():
+                _bind_wheel(c)
+        _bind_wheel(inner)
+
+    def _make_color_row(self, parent, token):
+        row = tk.Frame(parent, bg=T.SURFACE)
+        row.pack(fill="x", pady=1)
+
+        tk.Label(row, text=COLOR_LABELS.get(token, token), anchor="w",
+                 width=18, bg=T.SURFACE, fg=T.TEXT,
+                 font=(self._ui_font, 10)).pack(side="left")
+
+        swatch = tk.Label(row, bg=getattr(T, token), width=4, height=1,
+                          bd=0, relief="flat", cursor="hand2",
+                          highlightthickness=1,
+                          highlightbackground=T.BORDER_STRONG)
+        swatch.pack(side="left", padx=(6, 8), ipady=5)
+        swatch.bind("<Button-1>", lambda e, t=token: self._pick_color(t))
+
+        tk.Label(row, text=getattr(T, token), anchor="w",
+                 bg=T.SURFACE, fg=T.TEXT_MUTED,
+                 font=(self._mono_font, 9)).pack(side="left")
+
+    def _pick_color(self, token):
+        current = getattr(T, token)
+        result = colorchooser.askcolor(
+            color=current, parent=self,
+            title=f"Choose colour \u2014 {COLOR_LABELS.get(token, token)}")
+        if not result or not result[1]:
+            return
+        setattr(T, token, result[1])
+        self._save_ui_state()
+        self._rebuild_ui()
+
+    def _reset_theme(self):
+        if not messagebox.askyesno(
+                "Reset theme",
+                "Reset all colours to their default values?", parent=self):
+            return
+        for k, v in DEFAULT_COLORS.items():
+            setattr(T, k, v)
+        self._save_ui_state()
+        self._rebuild_ui()
+
+    def _rebuild_ui(self):
+        """Tear down and rebuild the entire UI with the current theme."""
+        # preserve state
+        self.save_current()          # flush any pending notes/desc edits
+        cur      = self.current
+        cur_task = self.current_task
+        try:
+            filt = self.filter_var.get()
+        except (AttributeError, tk.TclError):
+            filt = ""
+
+        # tear down
+        for child in self.winfo_children():
+            child.destroy()
+        self.row_widgets = {}
+        self.status_buttons = []
+        self.task_action_buttons = []
+
+        # reapply theme
+        self._ui_font, self._mono_font = setup_theme(self)
+        self.configure(bg=T.BG)
+
+        # rebuild
+        self.build_ui()
+        self.refresh_list()
+        if cur in self.data:
+            self.show_subject(cur)
+            if filt:
+                self.filter_var.set(filt)
+            tasks = self.data[cur]["tasks"]
+            if (cur_task is not None and 0 <= cur_task < len(tasks)
+                    and str(cur_task) in self.tree.get_children()):
+                self.refresh_tasks(select=cur_task)
+
+        # stay on the Settings tab so the user sees live changes
+        try:
+            self.tabs.select(2)
+        except tk.TclError:
+            pass
+
+    # -------------------------------------------------------------- rest
     def _on_filter_change(self, *_args):
         if self._refreshing:
             return
@@ -599,7 +769,6 @@ class NotesApp(tk.Tk):
             done = sum(t["status"] == DONE for t in tasks)
             self.subtitle_label.config(text=f"{done} of {len(tasks)} complete")
 
-    # ------------------------------------------- subject sidebar rows
     def _on_rows_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -659,8 +828,7 @@ class NotesApp(tk.Tk):
 
         def paint(bg, stripe_color, border_color=None):
             try:
-                row.configure(bg=bg,
-                              highlightbackground=border_color or T.BORDER)
+                row.configure(bg=bg, highlightbackground=border_color or T.BORDER)
                 stripe.configure(bg=stripe_color)
                 for w in (body, top, label, count):
                     w.configure(bg=bg)
@@ -791,8 +959,7 @@ class NotesApp(tk.Tk):
             messagebox.showwarning("Exists", f'"{new}" already exists.', parent=self)
             return
         self.save_current()
-        self.data = {(new if k == self.current else k): v
-                     for k, v in self.data.items()}
+        self.data = {(new if k == self.current else k): v for k, v in self.data.items()}
         self.write_file()
         self.current = new
         self.title_label.config(text=new)
@@ -803,11 +970,9 @@ class NotesApp(tk.Tk):
             return
         if not messagebox.askyesno(
             "Delete subject",
-            f'Delete "{self.current}" and all its tasks and notes?',
-            parent=self):
+            f'Delete "{self.current}" and all its tasks and notes?', parent=self):
             return
-        self._undo = ("subject", self.current,
-                      copy.deepcopy(self.data[self.current]))
+        self._undo = ("subject", self.current, copy.deepcopy(self.data[self.current]))
         del self.data[self.current]
         self.write_file()
         self.clear_editor()
@@ -842,12 +1007,9 @@ class NotesApp(tk.Tk):
                 self.tree.insert(
                     "", "end", iid=str(i),
                     values=(ICONS[t["status"]], t["title"]),
-                    tags=(t["status"], stripe),
-                )
-
+                    tags=(t["status"], stripe))
             done = sum(t["status"] == DONE for t in tasks)
             self.progress.config(text=f"{done}/{len(tasks)} done" if tasks else "")
-
             if select is not None and select in visible:
                 self.tree.selection_set(str(select))
                 self.tree.see(str(select))
@@ -857,7 +1019,6 @@ class NotesApp(tk.Tk):
                 self.clear_task_editor()
         finally:
             self._refreshing = False
-
         self.update_progress_bars(self.current)
         self._update_header_stats()
 
@@ -896,15 +1057,13 @@ class NotesApp(tk.Tk):
 
     def add_task(self):
         if not self.current:
-            messagebox.showinfo("No subject",
-                                "Add or select a subject first.", parent=self)
+            messagebox.showinfo("No subject", "Add or select a subject first.", parent=self)
             return
         title = simpledialog.askstring("Add task", "Task title:", parent=self)
         if not title or not title.strip():
             return
         self.save_task_desc()
-        self.tasks().append({"title": title.strip(), "status": NOT_DONE,
-                             "description": ""})
+        self.tasks().append({"title": title.strip(), "status": NOT_DONE, "description": ""})
         self.write_file()
         if self.filter_var.get():
             self.filter_var.set("")
@@ -1005,17 +1164,16 @@ class NotesApp(tk.Tk):
                     self.show_subject(subject)
                     self.refresh_tasks(select=idx)
                 self.update_progress_bars(subject)
-                self.status.config(
-                    text=f'\u21A9  Restored task "{task["title"]}"',
-                    fg=T.SUCCESS)
+                self.status.config(text=f'\u21A9  Restored task "{task["title"]}"',
+                                   fg=T.SUCCESS)
         else:
             _, name, payload = undo
             self.data[name] = payload
             self.write_file()
             self.refresh_list()
             self.show_subject(name)
-            self.status.config(
-                text=f'\u21A9  Restored subject "{name}"', fg=T.SUCCESS)
+            self.status.config(text=f'\u21A9  Restored subject "{name}"',
+                               fg=T.SUCCESS)
         return True
 
     def on_close(self):
